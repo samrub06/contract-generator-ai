@@ -24,85 +24,82 @@ interface ParsedData {
 // WITH TIMEOUT HANDLING AND AUTOMATIC RESUME CAPABILITY
 const RealTimeStreamingPage: React.FC = () => {
   const [prompt, setPrompt] = useState('Draft terms of service for a cloud cyber SaaS company based in New York');
-  const [isStreaming, setIsStreaming] = useState(false);
   const [streamedContent, setStreamedContent] = useState('');
-  const [currentSection, setCurrentSection] = useState('');
   const [sections, setSections] = useState<Section[]>([]);
-  const [sessionId, setSessionId] = useState<string>('');
+  const [parsedData, setParsedData] = useState<ParsedData | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [sessionId, setSessionId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isResuming, setIsResuming] = useState(false);
   const [timeoutCount, setTimeoutCount] = useState(0);
   const [showResumeButton, setShowResumeButton] = useState(false);
-  const [parsedData, setParsedData] = useState<ParsedData | null>(null);
+  const [canDownload, setCanDownload] = useState(false);
+  const [isJsonComplete, setIsJsonComplete] = useState(false);
 
   const startStreaming = useCallback(async (resumeFrom = '', existingSessionId = '') => {
-    if (!prompt.trim() && !resumeFrom) return;
-
     setIsStreaming(true);
     setError(null);
     setShowResumeButton(false);
+    setCanDownload(false);
+    setIsJsonComplete(false);
     
     if (!resumeFrom) {
-      // New generation
       setStreamedContent('');
       setSections([]);
-      setCurrentSection('');
       setTimeoutCount(0);
       setParsedData(null);
     } else {
-      // Resume from timeout
       setIsResuming(true);
       setStreamedContent(resumeFrom);
-      setCurrentSection('');
     }
 
     try {
       await htmlService.startRealTimeStreaming(
         prompt,
-        // onData callback
         (data: StreamingData) => {
-          console.log('Streaming data received:', data);
-          
           switch (data.type) {
             case 'connected':
               setSessionId(data.sessionId);
-              if (data.isResumed) {
-                setIsResuming(true);
-              }
+              if (data.isResumed) setIsResuming(true);
               break;
-              
+            
             case 'content':
               if (data.content) {
-                // Add each character to the streamed content
                 setStreamedContent(prev => {
                   const newContent = prev + data.content;
                   
-                  // Try to parse JSON as it streams in
+                  // Try to parse JSON in real-time
                   try {
                     if (newContent.trim().startsWith('{') && newContent.trim().endsWith('}')) {
                       const parsed = JSON.parse(newContent);
                       if (parsed.sections && Array.isArray(parsed.sections)) {
                         setParsedData(parsed);
                         setSections(parsed.sections);
+                        setIsJsonComplete(true);
+                        setCanDownload(true);
+                        // Auto-stop when JSON is complete
+                        if (isStreaming) {
+                          htmlService.stopToSGeneration(sessionId);
+                          setIsStreaming(false);
+                        }
                       }
                     }
                   } catch {
-                    // JSON not complete yet, continue streaming
+                    // JSON not complete yet
+                    setIsJsonComplete(false);
                   }
                   
                   return newContent;
                 });
-                setCurrentSection(prev => prev + data.content);
               }
               break;
-              
+            
             case 'section_complete':
               if (data.sectionContent && typeof data.sectionContent === 'object') {
-                // Section is complete, add it to sections array
                 setSections(prev => {
                   const newSections = [...prev];
-                  const existingIndex = newSections.findIndex(s => s.n === data.sectionNumber);
                   const sectionContent = data.sectionContent as unknown as Section;
+                  const existingIndex = newSections.findIndex(s => s.n === data.sectionNumber);
                   if (existingIndex >= 0) {
                     newSections[existingIndex] = sectionContent;
                   } else {
@@ -112,32 +109,31 @@ const RealTimeStreamingPage: React.FC = () => {
                 });
               }
               break;
-              
+            
             case 'timeout':
-              console.log('Timeout detected, can resume:', data.canResume);
               setIsStreaming(false);
               setShowResumeButton(true);
               setError('Connection timeout detected. You can resume generation from where it left off.');
               break;
-              
+            
             case 'complete':
               setIsStreaming(false);
               setIsResuming(false);
-              
-              // Final parsing attempt
               try {
                 if (streamedContent.trim().startsWith('{') && streamedContent.trim().endsWith('}')) {
                   const finalParsed = JSON.parse(streamedContent);
                   if (finalParsed.sections && Array.isArray(finalParsed.sections)) {
                     setParsedData(finalParsed);
                     setSections(finalParsed.sections);
+                    setIsJsonComplete(true);
+                    setCanDownload(true);
                   }
                 }
               } catch {
                 console.error('Final JSON parsing failed');
               }
               break;
-              
+            
             case 'error':
               setIsStreaming(false);
               setIsResuming(false);
@@ -148,182 +144,135 @@ const RealTimeStreamingPage: React.FC = () => {
               break;
           }
         },
-        // onError callback
         (error: Error) => {
           console.error('Streaming error:', error);
           setError(error.message);
           setIsStreaming(false);
           setIsResuming(false);
         },
-        // onComplete callback
         () => {
           console.log('Streaming completed');
           setIsStreaming(false);
           setIsResuming(false);
         },
-        // resumeFrom parameter
         resumeFrom,
-        // existingSessionId parameter
         existingSessionId
       );
     } catch (error) {
-      console.error('Failed to start streaming:', error);
       setError(error instanceof Error ? error.message : 'Failed to start streaming');
       setIsStreaming(false);
       setIsResuming(false);
     }
-  }, [prompt, currentSection, streamedContent]);
+  }, [prompt, streamedContent, isStreaming, sessionId]);
 
-  // Resume generation after timeout
-  const handleResume = useCallback(async () => {
-    if (!sessionId || !streamedContent) return;
-
-    setError(null);
-    setShowResumeButton(false);
-    
-    try {
-      await htmlService.resumeGeneration(
-        sessionId,
-        streamedContent,
-        // onData callback
-        (data: StreamingData) => {
-          console.log('Resume data received:', data);
-          
-          switch (data.type) {
-            case 'resume_started':
-              setIsResuming(true);
-              break;
-              
-            case 'content':
-              if (data.content) {
-                setStreamedContent(prev => {
-                  const newContent = prev + data.content;
-                  
-                  // Try to parse JSON as it streams in
-                  try {
-                    if (newContent.trim().startsWith('{') && newContent.trim().endsWith('}')) {
-                      const parsed = JSON.parse(newContent);
-                      if (parsed.sections && Array.isArray(parsed.sections)) {
-                        setParsedData(parsed);
-                        setSections(parsed.sections);
-                      }
-                    }
-                  } catch {
-                    // JSON not complete yet, continue streaming
-                  }
-                  
-                  return newContent;
-                });
-                setCurrentSection(prev => prev + data.content);
+  const handleStop = useCallback(async () => {
+    if (sessionId && isStreaming) {
+      try {
+        await htmlService.stopToSGeneration(sessionId);
+        setIsStreaming(false);
+        setIsResuming(false);
+        
+        // Try to parse the partial content for download
+        if (streamedContent.trim().startsWith('{')) {
+          try {
+            // Try to complete the JSON if it's almost done
+            let completedContent = streamedContent;
+            if (!completedContent.trim().endsWith('}')) {
+              // Find the last complete section and close it
+              const lastCompleteSection = completedContent.lastIndexOf('},');
+              if (lastCompleteSection > 0) {
+                completedContent = completedContent.substring(0, lastCompleteSection + 1) + ']}';
               }
-              break;
-              
-            case 'section_complete':
-              if (data.sectionContent && typeof data.sectionContent === 'object') {
-                setSections(prev => {
-                  const newSections = [...prev];
-                  const existingIndex = newSections.findIndex(s => s.n === data.sectionNumber);
-                  const sectionContent = data.sectionContent as unknown as Section;
-                  if (existingIndex >= 0) {
-                    newSections[existingIndex] = sectionContent;
-                  } else {
-                    newSections.push(sectionContent);
-                  }
-                  return newSections;
-                });
-              }
-              break;
-              
-            case 'timeout':
-              setIsStreaming(false);
-              setShowResumeButton(true);
-              setError('Connection timeout detected again. You can resume generation from where it left off.');
-              break;
-              
-            case 'complete':
-              setIsStreaming(false);
-              setIsResuming(false);
-              
-              // Final parsing attempt
-              try {
-                if (streamedContent.trim().startsWith('{') && streamedContent.trim().endsWith('}')) {
-                  const finalParsed = JSON.parse(streamedContent);
-                  if (finalParsed.sections && Array.isArray(finalParsed.sections)) {
-                    setParsedData(finalParsed);
-                    setSections(finalParsed.sections);
-                  }
-                }
-              } catch {
-                console.error('Final JSON parsing failed');
-              }
-              break;
-              
-            case 'error':
-              setIsStreaming(false);
-              setIsResuming(false);
-              setError(data.error || 'An error occurred during resume');
-              if (data.canResume) {
-                setShowResumeButton(true);
-              }
-              break;
+            }
+            
+            const parsed = JSON.parse(completedContent);
+            if (parsed.sections && Array.isArray(parsed.sections)) {
+              setParsedData(parsed);
+              setSections(parsed.sections);
+              setCanDownload(true);
+            }
+          } catch {
+            // If we can't parse, still allow download of raw content
+            setCanDownload(true);
           }
-        },
-        // onError callback
-        (error: Error) => {
-          console.error('Resume error:', error);
-          setError(error.message);
-          setIsStreaming(false);
-          setIsResuming(false);
-        },
-        // onComplete callback
-        () => {
-          console.log('Resume completed');
-          setIsStreaming(false);
-          setIsResuming(false);
         }
-      );
-    } catch (error) {
-      console.error('Failed to resume streaming:', error);
-      setError(error instanceof Error ? error.message : 'Failed to resume streaming');
-      setIsStreaming(false);
-      setIsResuming(false);
+      } catch {
+        setError('Failed to stop generation');
+      }
     }
-  }, [sessionId, streamedContent, currentSection]);
+  }, [sessionId, isStreaming, streamedContent]);
+
+  const handleResume = useCallback(async () => {
+    if (sessionId && streamedContent) {
+      await startStreaming(streamedContent, sessionId);
+    }
+  }, [sessionId, streamedContent, startStreaming]);
 
   const handleDownloadHTML = useCallback(() => {
-    if (!parsedData || !parsedData.sections || parsedData.sections.length === 0) return;
+    // If we have parsed data, use it; otherwise use raw content
+    let contentToFormat = parsedData;
+    
+    if (!contentToFormat && streamedContent.trim().startsWith('{')) {
+      try {
+        // Try to parse the raw content
+        let completedContent = streamedContent;
+        if (!completedContent.trim().endsWith('}')) {
+          // Find the last complete section and close it
+          const lastCompleteSection = completedContent.lastIndexOf('},');
+          if (lastCompleteSection > 0) {
+            completedContent = completedContent.substring(0, lastCompleteSection + 1) + ']}';
+          }
+        }
+        contentToFormat = JSON.parse(completedContent);
+      } catch {
+        // If parsing fails, create a basic structure from what we have
+        contentToFormat = {
+          sections: sections.length > 0 ? sections : [{
+            n: 1,
+            t: "Partial Content",
+            ss: [{
+              n: "1.1",
+              t: "Generated Content",
+              c: streamedContent,
+              l: null
+            }]
+          }]
+        };
+      }
+    }
 
-    // Create a complete HTML document with the structured data
-    const fullHTML = `
-<!DOCTYPE html>
+    if (!contentToFormat) {
+      setError('No content available for download');
+      return;
+    }
+
+    const fullHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Terms of Service - Generated</title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; line-height: 1.6; background-color: #f8f9fa; }
-        .tos-container { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .tos-header { text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 3px solid #007bff; }
-        .tos-header h1 { color: #007bff; font-size: 2.5em; margin-bottom: 10px; font-weight: 300; }
-        .tos-header p { color: #666; font-size: 1.1em; margin: 0; }
-        .tos-section { margin-bottom: 40px; padding: 20px; border-left: 4px solid #007bff; background: #f8f9fa; border-radius: 0 8px 8px 0; }
-        .section-title { color: #007bff; font-size: 1.8em; margin-bottom: 20px; font-weight: 600; border-bottom: 2px solid #e9ecef; padding-bottom: 10px; }
-        .subsection { margin-bottom: 25px; padding: 15px; background: white; border-radius: 6px; border: 1px solid #e9ecef; }
-        .subsection-title { color: #495057; font-size: 1.3em; margin-bottom: 15px; font-weight: 600; border-bottom: 1px solid #dee2e6; padding-bottom: 8px; }
-        .subsection-content p { margin-bottom: 15px; text-align: justify; color: #495057; }
-        .subsection-list { margin: 15px; padding-left: 20px; }
-        .subsection-list li { margin-bottom: 8px; color: #495057; }
-        .generation-info { background: #e3f2fd; border: 1px solid #2196f3; border-radius: 6px; padding: 15px; margin-bottom: 30px; font-size: 0.9em; color: #1976d2; }
-        .generation-info strong { color: #1565c0; }
-        .table-of-contents { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 20px; margin-bottom: 30px; }
-        .table-of-contents h3 { color: #495057; margin-bottom: 15px; font-size: 1.3em; }
-        .table-of-contents ul { list-style: none; padding: 0; margin: 0; }
-        .table-of-contents li { margin-bottom: 8px; padding: 8px 0; border-bottom: 1px solid #e9ecef; }
-        .table-of-contents a { color: #007bff; text-decoration: none; font-weight: 500; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 20px; background-color: #f5f5f5; }
+        .tos-container { max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .tos-header { text-align: center; border-bottom: 3px solid #2563eb; padding-bottom: 20px; margin-bottom: 30px; }
+        .tos-header h1 { color: #1e40af; margin: 0; font-size: 2.5em; }
+        .generation-info { background: #f8fafc; padding: 15px; border-radius: 6px; margin-bottom: 30px; border-left: 4px solid #2563eb; }
+        .table-of-contents { background: #f1f5f9; padding: 20px; border-radius: 6px; margin-bottom: 30px; }
+        .table-of-contents h3 { color: #1e40af; margin-top: 0; }
+        .table-of-contents ul { list-style: none; padding: 0; }
+        .table-of-contents li { margin: 8px 0; }
+        .table-of-contents a { color: #2563eb; text-decoration: none; font-weight: 500; }
         .table-of-contents a:hover { text-decoration: underline; }
-        .footer { margin-top: 40px; padding-top: 20px; border-top: 2px solid #e9ecef; text-align: center; color: #6c757d; font-size: 0.9em; }
-        .timeout-info { background: #fff3cd; padding: 10px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #ffc107; }
+        .section { margin-bottom: 30px; padding: 20px; background: #f8fafc; border-radius: 6px; border-left: 4px solid #2563eb; }
+        .section h3 { color: #1e40af; margin-top: 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; }
+        .subsection { margin: 15px 0; padding: 15px; background: white; border-radius: 4px; border: 1px solid #e2e8f0; }
+        .subsection h4 { color: #374151; margin-top: 0; }
+        .content { margin: 15px 0; line-height: 1.7; }
+        .list { margin: 15px 0; padding-left: 20px; }
+        .list li { margin: 8px 0; }
+        .footer { margin-top: 40px; padding-top: 20px; border-top: 2px solid #e2e8f0; text-align: center; color: #6b7280; font-size: 0.9em; }
+        .partial-notice { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 15px; border-radius: 6px; margin-bottom: 20px; }
     </style>
 </head>
 <body>
@@ -335,45 +284,41 @@ const RealTimeStreamingPage: React.FC = () => {
         
         <div class="generation-info">
             <strong>Generated on:</strong> ${new Date().toLocaleDateString()} at ${new Date().toLocaleTimeString()}<br>
-            <strong>Format:</strong> Structured JSON with real-time streaming<br>
-            <strong>Total Sections:</strong> ${parsedData.sections.length}
-            ${timeoutCount > 0 ? `<br><strong>Timeout recovery:</strong> ${timeoutCount} timeout(s) handled with automatic resume` : ''}
+            <strong>Total Sections:</strong> ${contentToFormat.sections ? contentToFormat.sections.length : 'Partial'}
         </div>
         
-        ${timeoutCount > 0 ? `
-        <div class="timeout-info">
-            <p><strong>⚠️ Note:</strong> This document was generated with ${timeoutCount} timeout recovery(ies). 
-            The AI seamlessly continued from where it left off, maintaining consistency.</p>
-        </div>
-        ` : ''}
+        ${!isJsonComplete ? '<div class="partial-notice"><strong>⚠️ Partial Content:</strong> This document contains partially generated content. The generation was stopped before completion.</div>' : ''}
         
         <div class="table-of-contents">
             <h3>Table of Contents</h3>
             <ul>
-                ${parsedData.sections.map((section: Section) => `<li><a href="#section-${section.n}">${section.n}. ${section.t}</a></li>`).join('')}
+                ${contentToFormat.sections ? contentToFormat.sections.map((section: Section) => 
+                    `<li><a href="#section-${section.n}">${section.n}. ${section.t}</a></li>`
+                ).join('') : '<li>Partial content available</li>'}
             </ul>
         </div>
         
-        ${parsedData.sections.map((section: Section) => `
-            <div class="tos-section" id="section-${section.n}">
-                <h3 class="section-title">${section.n}. ${section.t}</h3>
-                ${section.ss ? section.ss.map((subsection: Subsection) => `
+        ${contentToFormat.sections ? contentToFormat.sections.map((section: Section) => `
+            <div class="section" id="section-${section.n}">
+                <h3>${section.n}. ${section.t}</h3>
+                ${section.ss && Array.isArray(section.ss) ? section.ss.map((subsection: Subsection) => `
                     <div class="subsection">
-                        <h4 class="subsection-title">${subsection.n} ${subsection.t}</h4>
-                        ${subsection.c ? `<div class="subsection-content">${subsection.c.split('\\n\\n').filter((p: string) => p.trim()).map((p: string) => `<p>${p.trim()}</p>`).join('')}</div>` : ''}
+                        <h4>${subsection.n} ${subsection.t}</h4>
+                        ${subsection.c ? `<div class="content">${subsection.c.split('\\n\\n').filter(p => p.trim()).map((paragraph: string) => `<p>${paragraph.trim()}</p>`).join('')}</div>` : ''}
                         ${subsection.l && Array.isArray(subsection.l) && subsection.l.length > 0 ? `
-                            <ol class="subsection-list">
+                            <ol class="list">
                                 ${subsection.l.map((item: string) => `<li>${item.trim()}</li>`).join('')}
                             </ol>
                         ` : ''}
                     </div>
                 `).join('') : ''}
             </div>
-        `).join('')}
+        `).join('') : '<div class="section"><h3>Partial Content</h3><div class="content"><p>Content generation was stopped before completion.</p></div></div>'}
         
         <div class="footer">
             <p>This document was generated by AI and should be reviewed by legal professionals before use.</p>
             <p>Generated with Contract Generator AI - Real-time streaming technology</p>
+            ${!isJsonComplete ? '<p><strong>Note:</strong> This is a partial document. Consider resuming generation to complete the Terms of Service.</p>' : ''}
         </div>
     </div>
 </body>
@@ -383,25 +328,22 @@ const RealTimeStreamingPage: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `terms_of_service_structured_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.html`;
+    a.download = `terms_of_service_${isJsonComplete ? 'complete' : 'partial'}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.html`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [parsedData, timeoutCount]);
+  }, [parsedData, sections, streamedContent, isJsonComplete]);
 
   return (
     <div className="max-w-6xl mx-auto p-8 space-y-8">
       {/* Header */}
-      <div className="text-center">
-        <h1 className="text-3xl font-bold text-gray-800 mb-2">
-          Real-Time Terms of Service Generator
+      <div className="text-center space-y-4">
+        <h1 className="text-4xl font-bold text-gray-900">
+          Contract Generator AI
         </h1>
-        <p className="text-gray-600">
-          Watch your Terms of Service being generated in structured JSON format, character by character!
-        </p>
-        <p className="text-sm text-blue-600 mt-2">
-          ⚡ With automatic timeout recovery and structured output like Perplexity & Zoom
+        <p className="text-xl text-gray-600 max-w-2xl mx-auto">
+          Generate professional Terms of Service with real-time streaming
         </p>
       </div>
 
@@ -434,13 +376,22 @@ const RealTimeStreamingPage: React.FC = () => {
                 🔄 Resume Generation
               </button>
             )}
+            {isStreaming && (
+              <button
+                className="px-6 py-3 rounded-lg bg-red-600 text-white font-medium hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition-colors text-lg"
+                onClick={handleStop}
+                disabled={!sessionId || !isStreaming}
+              >
+                ⚠️ Stop Generation
+              </button>
+            )}
           </div>
           
           <div className="flex gap-2">
             <button
               onClick={handleDownloadHTML}
               className="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={!parsedData}
+              disabled={!canDownload}
             >
               📥 Download HTML
             </button>
@@ -475,6 +426,56 @@ const RealTimeStreamingPage: React.FC = () => {
             </div>
           </div>
         )}
+
+            {/* Streaming Status */}
+            {isStreaming && (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                  <div>
+                    <h3 className="text-lg font-medium text-blue-800">
+                      {isResuming ? '🔄 Resuming Generation...' : '🚀 Generating Terms of Service...'}
+                    </h3>
+                    <p className="text-blue-600">
+                      {isResuming 
+                        ? 'Continuing from where we left off...' 
+                        : 'Creating professional legal content in real-time...'
+                      }
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Generation Complete Status */}
+            {!isStreaming && isJsonComplete && (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="text-green-600 text-2xl">✅</div>
+                  <div>
+                    <h3 className="text-lg font-medium text-green-800">Generation Complete!</h3>
+                    <p className="text-green-600">
+                      Your Terms of Service has been generated successfully. You can now download the HTML document.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Partial Content Status */}
+            {!isStreaming && !isJsonComplete && streamedContent && (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="text-yellow-600 text-2xl">⚠️</div>
+                  <div>
+                    <h3 className="text-lg font-medium text-yellow-800">Partial Content Generated</h3>
+                    <p className="text-yellow-600">
+                      Generation was stopped before completion. You can download what was generated or resume to continue.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
       </div>
 
       {/* Real-time Streaming Display */}
@@ -560,16 +561,9 @@ const RealTimeStreamingPage: React.FC = () => {
         </div>
       )}
 
-      {/* Info about the system */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-        <h3 className="font-medium text-blue-800 mb-2">How it works:</h3>
-        <ul className="text-sm text-blue-700 space-y-1">
-          <li>• <strong>Structured JSON:</strong> Output format like Perplexity & Zoom</li>
-          <li>• <strong>Real-time streaming:</strong> Watch content appear character by character</li>
-          <li>• <strong>Professional format:</strong> Sections, subsections, and numbered lists</li>
-          <li>• <strong>Automatic timeout recovery:</strong> Seamlessly resume if connection drops</li>
-          <li>• <strong>Professional export:</strong> Beautiful HTML document ready for use</li>
-        </ul>
+      {/* Footer with Features */}
+      <div className="text-center text-gray-500 text-sm">
+        <p>Powered by OpenAI GPT-4 • Real-time streaming technology</p>
       </div>
     </div>
   );

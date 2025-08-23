@@ -25,7 +25,17 @@ const Header: React.FC = () => {
                   : 'text-gray-600 hover:text-indigo-600 hover:bg-indigo-50'
               }`}
             >
-              ⚡ Real-Time Streaming
+              🚀 Long Contracts
+            </Link>
+            <Link 
+              to="/legacy" 
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                location.pathname === '/legacy' 
+                  ? 'bg-indigo-100 text-indigo-700' 
+                  : 'text-gray-600 hover:text-indigo-600 hover:bg-indigo-50'
+              }`}
+            >
+              ⚡ Legacy Streaming
             </Link>
           </nav>
         </div>
