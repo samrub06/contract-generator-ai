@@ -1,93 +1,56 @@
 import express from 'express';
 import { contractGenerationLimiter } from '../middleware/rateLimiter.js';
-import { streamContract } from '../services/openaiService.js';
-import { generateContractPrompt } from '../services/promptService.js';
-import { retryService } from '../services/retryService.js';
-import { tokenService } from '../services/tokenService.js';
+import realTimeStreamingService from '../services/streamingService.js';
 
 const router = express.Router();
 
 /**
- * Enhanced contract generation with production features
+ * Start REAL-TIME streaming generation (character by character like ChatGPT)
+ * WITH TIMEOUT HANDLING AND RESUME CAPABILITY
  */
-router.post('/generate', contractGenerationLimiter, async (req, res) => {
-  const { prompt } = req.body;
+router.post('/tos/stream', contractGenerationLimiter, async (req, res) => {
+  const { prompt, resumeFrom, sessionId: existingSessionId } = req.body;
 
   if (!prompt) {
     return res.status(400).json({
       error: 'Missing prompt',
-      message: 'Please provide a contract description'
+      message: 'Please provide a description for Terms of Service'
     });
   }
 
   try {
-    // Generate enhanced prompt
-    const enhancedPrompt = generateContractPrompt(prompt);
+    // Generate new session ID or use existing one for resume
+    const sessionId = existingSessionId || `stream_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    // Count tokens and validate
-    const inputTokens = tokenService.countTokens(enhancedPrompt);
-    const validation = tokenService.validateTokenLimit('gpt-4o', inputTokens);
-    
-    if (!validation.valid) {
-      return res.status(400).json({
-        error: 'Token limit exceeded',
-        message: validation.error,
-        details: {
-          inputTokens,
-          limit: validation.limit,
-          remaining: validation.remaining
-        }
-      });
-    }
-
-    // Estimate cost
-    const estimatedCost = tokenService.estimateCost('gpt-4o', inputTokens, 2000); // Estimate 2000 output tokens
-    
-    console.log(`Contract generation request:`, {
-      inputTokens,
-      estimatedCost: estimatedCost.totalCost,
-      model: 'gpt-4o'
-    });
-
-    // Set SSE headers
+    // Configure response for Server-Sent Events (SSE)
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*'
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Cache-Control'
     });
 
-    // Send initial status
+    // Send initial connection message
     res.write(`data: ${JSON.stringify({
-      progress: "validating",
-      message: "Validating request and counting tokens...",
-      tokenInfo: {
-        inputTokens,
-        estimatedCost: estimatedCost.totalCost,
-        model: 'gpt-4o'
-      },
-      timestamp: new Date().toISOString()
+      type: 'connected',
+      sessionId: sessionId,
+      message: resumeFrom ? 'Resuming generation...' : 'Real-time streaming started',
+      isResumed: !!resumeFrom
     })}\n\n`);
 
-    // Execute OpenAI streaming with retry logic
-    await retryService.executeStreamingWithRetry(
-      () => streamContract(enhancedPrompt, res),
-      {
-        maxRetries: 2,
-        timeout: 180000, // 3 minutes for contract generation
-        baseDelay: 2000  // 2 seconds base delay
-      }
-    );
-
-  } catch (error) {
-    console.error('Contract generation error:', error);
+    // Start real-time streaming with resume capability
+    await realTimeStreamingService.startRealTimeStreaming(prompt, sessionId, res, resumeFrom || '');
     
-    // Send error to client
+  } catch (error) {
+    console.error('ToS real-time streaming error:', error);
+    
+    // Send error to frontend
     res.write(`data: ${JSON.stringify({
-      progress: "failed",
-      error: error.message,
-      message: "Contract generation failed",
-      timestamp: new Date().toISOString()
+      type: 'error',
+      error: 'Generation failed',
+      message: error.message,
+      canResume: false
     })}\n\n`);
     
     res.end();
@@ -95,41 +58,118 @@ router.post('/generate', contractGenerationLimiter, async (req, res) => {
 });
 
 /**
- * Get token information for a prompt (pre-validation)
+ * Resume generation after a timeout
  */
-router.post('/validate', contractGenerationLimiter, (req, res) => {
-  const { prompt } = req.body;
+router.post('/tos/resume', contractGenerationLimiter, async (req, res) => {
+  const { sessionId, resumeFrom } = req.body;
 
-  if (!prompt) {
+  if (!sessionId || !resumeFrom) {
     return res.status(400).json({
-      error: 'Missing prompt',
-      message: 'Please provide a contract description'
+      error: 'Missing sessionId or resumeFrom',
+      message: 'Session ID and content to resume from are required'
     });
   }
 
   try {
-    const enhancedPrompt = generateContractPrompt(prompt);
-    const inputTokens = tokenService.countTokens(enhancedPrompt);
-    const validation = tokenService.validateTokenLimit('gpt-4o', inputTokens);
-    const estimatedCost = tokenService.estimateCost('gpt-4o', inputTokens, 2000);
-    const recommendedModel = tokenService.getRecommendedModel(inputTokens);
+    // Configure response for Server-Sent Events (SSE)
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Cache-Control'
+    });
+
+    // Send resume connection message
+    res.write(`data: ${JSON.stringify({
+      type: 'resume_started',
+      sessionId: sessionId,
+      message: 'Resuming generation from timeout...',
+      isResumed: true
+    })}\n\n`);
+
+    // Resume streaming from where it left off
+    await realTimeStreamingService.resumeGeneration(sessionId, resumeFrom, res);
+    
+  } catch (error) {
+    console.error('ToS resume error:', error);
+    
+    // Send error to frontend
+    res.write(`data: ${JSON.stringify({
+      type: 'error',
+      error: 'Resume failed',
+      message: error.message,
+      canResume: false
+    })}\n\n`);
+    
+    res.end();
+  }
+});
+
+/**
+ * Stop generation for a specific session
+ */
+router.post('/tos/stop', contractGenerationLimiter, async (req, res) => {
+  const { sessionId } = req.body;
+
+  if (!sessionId) {
+    return res.status(400).json({
+      error: 'Missing sessionId',
+      message: 'Session ID is required'
+    });
+  }
+
+  try {
+    const result = await realTimeStreamingService.stopGeneration(sessionId);
+    
+    res.json({
+      success: true,
+      sessionId: result.sessionId,
+      message: result.message,
+      lastContent: result.lastContent
+    });
+    
+  } catch (error) {
+    console.error('ToS stop error:', error);
+    res.status(500).json({
+      error: 'Stop failed',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * Get session information
+ */
+router.get('/tos/session/:sessionId', contractGenerationLimiter, async (req, res) => {
+  const { sessionId } = req.params;
+
+  try {
+    const session = realTimeStreamingService.getSession(sessionId);
+    const timeoutCount = realTimeStreamingService.getTimeoutCount(sessionId);
+    
+    if (!session) {
+      return res.status(404).json({
+        error: 'Session not found',
+        message: 'Session does not exist or has expired'
+      });
+    }
 
     res.json({
       success: true,
-      validation: {
-        ...validation,
-        recommendedModel
-      },
-      cost: estimatedCost,
-      prompt: {
-        original: prompt,
-        enhanced: enhancedPrompt,
-        inputTokens
+      session: {
+        id: session.id,
+        status: session.status,
+        createdAt: session.createdAt,
+        lastContent: session.lastContent,
+        timeoutCount: timeoutCount
       }
     });
+    
   } catch (error) {
+    console.error('Get session error:', error);
     res.status(500).json({
-      error: 'Validation failed',
+      error: 'Failed to get session',
       message: error.message
     });
   }

@@ -1,52 +1,74 @@
 /**
- * Generic contract prompt service for any type of contract
- * Optimized for ultra-compact format to save tokens
+ * Optimized Terms of Service prompt service with intelligent chunking
+ * Generates chunks of 4 sections to save API calls and reduce costs
  */
 
-function generateContractPrompt(userPrompt) {
-  return `Generate a professional legal contract in ultra-compact format. The contract type and structure will depend on the user's request.
+function generateToSChunkPrompt(userPrompt, startSection, chunkSize = 4) {
+  const sectionNames = [
+    "Definitions & Scope",
+    "Services & Usage", 
+    "User Obligations",
+    "Intellectual Property",
+    "Privacy & Data",
+    "Limitation of Liability",
+    "Indemnification",
+    "Termination",
+    "Governing Law",
+    "Miscellaneous"
+  ];
 
-REQUIRED FORMAT (follow exactly):
+  const currentChunkSections = sectionNames.slice(startSection - 1, startSection - 1 + chunkSize);
+  
+  return `Generate Terms of Service for: ${userPrompt}
+
+INSTRUCTIONS:
+- Generate ${chunkSize} consecutive sections starting from Section ${startSection}
+- Use ultra-compact format to save tokens
+- Each section should be different and legally comprehensive
+- Focus on: ${currentChunkSections.join(', ')}
+
+REQUIRED JSON FORMAT (${chunkSize} sections at once):
 {
   "sections": [
     {
-      "n": 1,
+      "n": ${startSection},
       "t": "Title",
       "ss": [
         {
-          "n": "1.1",
+          "n": "${startSection}.1",
           "t": "Subtitle",
-          "c": "Content description",
-          "l": ["(i) List item", "(ii) Another item"]
+          "c": "Legal content...",
+          "l": ["(i) item", "(ii) item"] or null
+        }
+      ]
+    },
+    {
+      "n": ${startSection + 1},
+      "t": "Title",
+      "ss": [
+        {
+          "n": "${startSection + 1}.1",
+          "t": "Subtitle", 
+          "c": "Legal content...",
+          "l": ["(i) item", "(ii) item"] or null
         }
       ]
     }
+    // ... continue for ${chunkSize} sections
   ]
 }
 
-CONTRACT STRUCTURE GUIDELINES:
-- Use ultra-short titles (2-3 words max) to save tokens
-- Structure with numbered sections (1, 2, 3...) and subsections (1.1, 1.2...)
-- Include relevant sections based on contract type
-- Use (i), (ii), (iii) for numbered lists
-- Keep content legally comprehensive but concise
+TOKEN OPTIMIZATION:
+- Use abbreviations: "Def" for Definitions, "IP" for Intellectual Property
+- Keep titles under 3 words
+- Use short legal terms
+- Minimize redundant language
+- Each section should be 800-1200 tokens max
 
-COMMON CONTRACT SECTIONS (adapt based on type):
-- Definitions/Scope
-- Parties involved
-- Services/obligations
-- Terms and conditions
-- Intellectual property
-- Liability/indemnification
-- Termination
-- Governing law
-- Signatures/effective date
-
-User request: ${userPrompt}
-
-Generate a complete, legally sound contract following this exact structure. Adapt the content and sections to match the specific contract type requested.`;
+IMPORTANT: Return ONLY valid JSON format with ${chunkSize} sections. Generate sections ${startSection} to ${startSection + chunkSize - 1}.`;
 }
 
 export {
-  generateContractPrompt
+  generateToSChunkPrompt
 };
+
