@@ -40,7 +40,7 @@ router.post('/tos/long-contract', contractGenerationLimiter, async (req, res) =>
       mode: 'LONG_CONTRACT_ONLY'
     })}\n\n`);
 
-    // 🎯 GENERATE LONG CONTRACT: Smart chunking + OpenAI structured output
+    // Generate long contract: Smart chunking + OpenAI structured output
     const contractResult = await longContractService.generateLongContract(prompt, sessionId, res);
     
     // Send final structured JSON result

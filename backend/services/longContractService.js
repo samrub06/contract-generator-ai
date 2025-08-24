@@ -16,6 +16,11 @@ class LongContractService {
       estimatedSectionsForLongContract: 12, // Typical sections for comprehensive contract
       parallelChunks: 4        // Generate 4 chunks in parallel
     };
+    
+    // Track stopped sessions
+    this.stoppedSessions = new Set();
+    // Track active OpenAI requests per session
+    this.activeRequests = new Map(); // sessionId -> AbortController
   }
 
   /**
@@ -42,7 +47,11 @@ class LongContractService {
       this.sendUpdate(res, {
         type: 'strategy',
         sessionId,
-        strategy,
+        analysis: {
+          strategy: strategy.strategy,
+          totalChunks: strategy.totalChunks,
+          sectionsPerChunk: strategy.sectionsPerChunk
+        },
         message: `Generating ${strategy.totalChunks} chunks with ${strategy.sectionsPerChunk} sections each`
       });
 
@@ -56,14 +65,14 @@ class LongContractService {
         message: 'Contract metadata generated'
       });
 
-      // Generate chunks in parallel
+      // Generate chunks sequentially (in order)
       this.sendUpdate(res, {
         type: 'chunks_start',
         sessionId,
-        message: 'Starting parallel chunk generation...'
+        message: 'Starting sequential chunk generation...'
       });
 
-      const chunks = await this.generateChunksInParallel(
+      const chunks = await this.generateChunksSequentially(
         userPrompt, 
         strategy, 
         sessionId, 
@@ -171,47 +180,142 @@ class LongContractService {
   }
 
   /**
-   * GENERATE CHUNKS IN PARALLEL with smart orchestration
+   * GENERATE CHUNKS SEQUENTIALLY in order (much better for debugging & UX)
    */
-  async generateChunksInParallel(userPrompt, strategy, sessionId, res) {
-    const chunkPromises = [];
+  async generateChunksSequentially(userPrompt, strategy, sessionId, res) {
+    const successfulChunks = [];
+    const failedChunks = [];
     
-    // Create chunk generation promises
+    // Generate chunks one by one in order
     for (let i = 0; i < strategy.totalChunks; i++) {
+      // Check if session was stopped
+      if (this.stoppedSessions.has(sessionId)) {
+        console.log(`🛑 Session ${sessionId} was stopped, halting generation at chunk ${i + 1}`);
+        
+        this.sendUpdate(res, {
+          type: 'stopped',
+          sessionId,
+          message: `Generation stopped at chunk ${i + 1}/${strategy.totalChunks}`,
+          completedChunks: successfulChunks.length
+        });
+        
+        break; // Exit the loop immediately
+      }
+      
       const startSection = (i * strategy.sectionsPerChunk) + 1;
       const endSection = Math.min(startSection + strategy.sectionsPerChunk - 1, strategy.estimatedSections);
       
-      const chunkPromise = this.generateSingleChunk({
-        userPrompt,
-        chunkIndex: i,
-        totalChunks: strategy.totalChunks,
-        startSection,
-        endSection,
-        sessionId
-      }, res);
+      try {
+        console.log(`Starting chunk ${i + 1}/${strategy.totalChunks} (sequential)`);
+        
+        // Create abort controller for this chunk
+        const abortController = new AbortController();
+        this.activeRequests.set(sessionId, abortController);
+        
+        const chunkResult = await this.generateSingleChunk({
+          userPrompt,
+          chunkIndex: i,
+          totalChunks: strategy.totalChunks,
+          startSection,
+          endSection,
+          sessionId,
+          abortSignal: abortController.signal
+        }, res);
+        
+        // Clear the abort controller when chunk completes
+        this.activeRequests.delete(sessionId);
 
-      chunkPromises.push(chunkPromise);
+        successfulChunks.push(chunkResult);
+        
+        console.log(`Chunk ${i + 1}/${strategy.totalChunks} completed successfully`);
+        
+        // Small delay between chunks to avoid rate limits (also check for stop)
+        if (i < strategy.totalChunks - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          // Check again after delay
+          if (this.stoppedSessions.has(sessionId)) {
+            console.log(`🛑 Session ${sessionId} was stopped during delay, halting generation`);
+            break;
+          }
+        }
+        
+      } catch (error) {
+        // Check if error is from abort
+        if (error.message.includes('aborted') || error.message.includes('stopped by user')) {
+          console.log(`🛑 Chunk ${i + 1} generation aborted by user stop`);
+          break; // Exit the loop completely
+        }
+        
+        console.error(`❌ Chunk ${i + 1} failed (attempt 1):`, error.message);
+        
+        // Retry logic: Try up to 2 more times with fallback content
+        let retrySuccess = false;
+        const maxRetries = 2;
+        
+        for (let retry = 1; retry <= maxRetries && !retrySuccess; retry++) {
+          try {
+            console.log(`Retrying chunk ${i + 1} (attempt ${retry + 1}/${maxRetries + 1})`);
+            
+            this.sendUpdate(res, {
+              type: 'chunk_retry',
+              sessionId,
+              chunkIndex: i + 1,
+              totalChunks: strategy.totalChunks,
+              retryAttempt: retry,
+              message: `Retrying chunk ${i + 1} (attempt ${retry + 1})...`
+            });
+            
+            // Wait a bit before retry
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            const retryResult = await this.generateSingleChunk({
+              userPrompt,
+              chunkIndex: i,
+              totalChunks: strategy.totalChunks,
+              startSection,
+              endSection,
+              sessionId,
+              abortSignal: abortController.signal
+            }, res);
 
-      // Stagger chunk starts to respect rate limits
-      if (i < strategy.totalChunks - 1) {
-        await new Promise(resolve => setTimeout(resolve, 300));
+            successfulChunks.push(retryResult);
+            retrySuccess = true;
+            
+            console.log(`Chunk ${i + 1} succeeded on retry ${retry}`);
+            
+          } catch (retryError) {
+            console.error(`❌ Chunk ${i + 1} retry ${retry} failed:`, retryError.message);
+          }
+        }
+        
+        if (!retrySuccess) {
+          // Fallback: Create a placeholder chunk with basic content
+          console.log(`🛠️ Creating fallback content for chunk ${i + 1}`);
+          
+          const fallbackChunk = this.createFallbackChunk(i, strategy.totalChunks, startSection, endSection, userPrompt);
+          successfulChunks.push(fallbackChunk);
+          
+          failedChunks.push({ index: i, error: error.message, hadFallback: true });
+          
+          this.sendUpdate(res, {
+            type: 'chunk_fallback',
+            sessionId,
+            chunkIndex: i + 1,
+            totalChunks: strategy.totalChunks,
+            error: error.message,
+            message: `Chunk ${i + 1} failed, using fallback content`,
+            // Send fallback chunk data for display
+            chunkData: {
+              chunkId: fallbackChunk.chunkId,
+              chunkIndex: fallbackChunk.chunkIndex,
+              totalChunks,
+              sections: fallbackChunk.sections
+            }
+          });
+        }
       }
     }
-
-    // Wait for all chunks to complete
-    const results = await Promise.allSettled(chunkPromises);
-    
-    // Process results
-    const successfulChunks = [];
-    const failedChunks = [];
-
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled') {
-        successfulChunks.push(result.value);
-      } else {
-        failedChunks.push({ index, error: result.reason.message });
-      }
-    });
 
     if (failedChunks.length > 0) {
       console.warn(`⚠️  ${failedChunks.length}/${strategy.totalChunks} chunks failed:`, failedChunks);
@@ -221,15 +325,15 @@ class LongContractService {
       throw new Error('All chunks failed to generate');
     }
 
-    // Sort chunks by index
-    return successfulChunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    console.log(`🎉 Sequential generation completed: ${successfulChunks.length}/${strategy.totalChunks} chunks successful`);
+    return successfulChunks; // Already in order!
   }
 
   /**
    * GENERATE SINGLE CHUNK with OpenAI structured output
    */
   async generateSingleChunk(chunkConfig, res) {
-    const { userPrompt, chunkIndex, totalChunks, startSection, endSection, sessionId } = chunkConfig;
+    const { userPrompt, chunkIndex, totalChunks, startSection, endSection, sessionId, abortSignal } = chunkConfig;
     
     try {
       this.sendUpdate(res, {
@@ -240,23 +344,36 @@ class LongContractService {
         message: `Generating chunk ${chunkIndex + 1}/${totalChunks} (sections ${startSection}-${endSection})`
       });
 
+      // Check for abort before OpenAI call
+      if (abortSignal && abortSignal.aborted) {
+        throw new Error('Generation was stopped by user');
+      }
+      
       // Generate chunk using OpenAI structured output
       const chunkResult = await generateLongContractChunk({
         userPrompt,
         chunkIndex,
         totalChunks,
         startSection,
-        endSection
+        endSection,
+        abortSignal
       });
 
-      this.sendUpdate(res, {
-        type: 'chunk_completed',
-        sessionId,
-        chunkIndex: chunkIndex + 1,
-        totalChunks,
-        message: `Chunk ${chunkIndex + 1}/${totalChunks} completed`,
-        sectionsGenerated: chunkResult.sections.length
-      });
+              this.sendUpdate(res, {
+          type: 'chunk_completed',
+          sessionId,
+          chunkIndex: chunkIndex + 1,
+          totalChunks,
+          message: `Chunk ${chunkIndex + 1}/${totalChunks} completed`,
+          sectionsGenerated: chunkResult.sections.length,
+          // Send chunk data for real-time display
+          chunkData: {
+            chunkId: `chunk_${chunkIndex + 1}`,
+            chunkIndex,
+            totalChunks,
+            sections: chunkResult.sections
+          }
+        });
 
       return {
         chunkId: `chunk_${chunkIndex + 1}`,
@@ -291,12 +408,98 @@ class LongContractService {
   }
 
   /**
-   * STOP GENERATION (if needed)
+   * STOP GENERATION (immediate stop)
    */
   async stopGeneration(sessionId) {
-    // Implementation for stopping generation
+    // Mark session as stopped
+    this.stoppedSessions.add(sessionId);
+    
+    // Abort active OpenAI request
+    const abortController = this.activeRequests.get(sessionId);
+    if (abortController) {
+      console.log(`🛑 Aborting active OpenAI request for session: ${sessionId}`);
+      abortController.abort();
+      this.activeRequests.delete(sessionId);
+    }
+    
     console.log(`🛑 Stopping long contract generation for session: ${sessionId}`);
-    return { sessionId, message: 'Generation stopped' };
+    
+    // Clean up after a delay to prevent memory leaks
+    setTimeout(() => {
+      this.stoppedSessions.delete(sessionId);
+      console.log(`🧹 Cleaned up stopped session: ${sessionId}`);
+    }, 60000); // Clean up after 1 minute
+    
+    return { sessionId, message: 'Generation stopped immediately' };
+  }
+
+  /**
+   * CREATE FALLBACK CHUNK when OpenAI fails
+   * @param {number} chunkIndex - Index of the failed chunk
+   * @param {number} totalChunks - Total number of chunks
+   * @param {number} startSection - Start section number
+   * @param {number} endSection - End section number
+   * @param {string} userPrompt - Original user prompt
+   * @returns {Object} - Fallback chunk with basic content
+   */
+  createFallbackChunk(chunkIndex, totalChunks, startSection, endSection, userPrompt) {
+    const sectionCount = endSection - startSection + 1;
+    const sections = [];
+    
+    for (let i = 0; i < sectionCount; i++) {
+      const sectionNumber = startSection + i;
+      const sectionTitle = this.getFallbackSectionTitle(sectionNumber);
+      
+      sections.push({
+        id: sectionNumber.toString(),
+        title: sectionTitle,
+        subsections: [{
+          id: `${sectionNumber}.1`,
+          title: "General Provisions",
+          content: `This section covers ${sectionTitle.toLowerCase()} for the services described as: ${userPrompt}. Detailed legal provisions will be added in a future version of this document.`,
+          items: [
+            "This is a placeholder section generated due to temporary service issues",
+            "Legal review is recommended before using this document",
+            "Contact support for complete section generation"
+          ]
+        }]
+      });
+    }
+    
+    return {
+      chunkId: `chunk_${chunkIndex + 1}_fallback`,
+      chunkIndex,
+      sections,
+      tokensUsed: 0
+    };
+  }
+
+  /**
+   * GET FALLBACK SECTION TITLE based on section number
+   */
+  getFallbackSectionTitle(sectionNumber) {
+    const titles = {
+      1: "Service Definition and Scope",
+      2: "User Account and Registration",
+      3: "Acceptable Use Policy",
+      4: "Intellectual Property Rights",
+      5: "Privacy and Data Protection",
+      6: "Payment and Billing Terms",
+      7: "Service Availability",
+      8: "Limitation of Liability",
+      9: "Indemnification",
+      10: "Termination and Suspension",
+      11: "Governing Law",
+      12: "General Provisions",
+      13: "Service Level Agreement",
+      14: "International Compliance",
+      15: "API Terms and Conditions",
+      16: "Enterprise Features",
+      17: "Security Standards",
+      18: "Amendment Procedures"
+    };
+    
+    return titles[sectionNumber] || `Legal Provisions Section ${sectionNumber}`;
   }
 
   /**

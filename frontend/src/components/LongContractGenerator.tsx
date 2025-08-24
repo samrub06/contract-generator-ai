@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { longContractService } from '../api/longContractService';
 import type {
   ContractChunk,
+  ContractMetadata,
   ContractSection,
   GenerationStatus,
   LongContractResponse,
@@ -17,6 +18,9 @@ export const LongContractGenerator: React.FC = () => {
   // State management
   const [prompt, setPrompt] = useState('comprehensive enterprise SaaS platform terms with API access, international compliance, GDPR support, and advanced security features');
   const [contract, setContract] = useState<LongContractResponse | null>(null);
+  const [partialChunks, setPartialChunks] = useState<ContractChunk[]>([]); // Real-time chunks
+  const [fallbackChunks, setFallbackChunks] = useState<Set<number>>(new Set()); // Track fallback chunks
+  const [metadata, setMetadata] = useState<ContractMetadata | null>(null);
   const [status, setStatus] = useState<GenerationStatus>({
     isGenerating: false,
     currentPhase: 'idle',
@@ -24,18 +28,29 @@ export const LongContractGenerator: React.FC = () => {
     totalChunks: 0,
   });
   const [sessionId, setSessionId] = useState('');
-  const [logs, setLogs] = useState<LongContractSSEEvent[]>([]);
   const [eventSource, setEventSource] = useState<EventSource | null>(null);
 
-  // Add log entry
-  const addLog = useCallback((event: LongContractSSEEvent) => {
-    setLogs(prev => [...prev, { ...event, timestamp: Date.now() } as LongContractSSEEvent & { timestamp: number }]);
+  // Add chunk in real-time
+  const addChunk = useCallback((chunk: ContractChunk) => {
+    setPartialChunks(prev => {
+      const updated = [...prev];
+      const existingIndex = updated.findIndex(c => c.chunkIndex === chunk.chunkIndex);
+      
+      if (existingIndex >= 0) {
+        updated[existingIndex] = chunk;
+      } else {
+        updated.push(chunk);
+        // Sort by chunk index to maintain order
+        updated.sort((a, b) => a.chunkIndex - b.chunkIndex);
+      }
+      
+      return updated;
+    });
   }, []);
 
   // Handle SSE events
   const handleSSEEvent = useCallback((event: LongContractSSEEvent) => {
-    console.log('📡 SSE Event:', event.type, event.message);
-    addLog(event);
+    console.log('SSE Event:', event.type, event.message);
 
     switch (event.type) {
       case 'connected':
@@ -49,6 +64,7 @@ export const LongContractGenerator: React.FC = () => {
 
       case 'strategy':
         if (event.analysis) {
+          console.log(`Strategy received: ${event.analysis.totalChunks} total chunks`);
           setStatus(prev => ({ 
             ...prev, 
             currentPhase: 'chunking',
@@ -58,6 +74,9 @@ export const LongContractGenerator: React.FC = () => {
         break;
 
       case 'metadata':
+        if (event.metadata) {
+          setMetadata(event.metadata);
+        }
         setStatus(prev => ({ ...prev, currentPhase: 'generating' }));
         break;
 
@@ -72,14 +91,45 @@ export const LongContractGenerator: React.FC = () => {
         break;
 
       case 'chunk_completed':
+        console.log(`Chunk ${event.chunkIndex} completed, updating count`);
         setStatus(prev => ({ 
           ...prev, 
-          completedChunks: prev.completedChunks + 1 
+          completedChunks: event.chunkIndex || prev.completedChunks + 1 
         }));
+        
+        // Add chunk to real-time display
+        if (event.chunkData) {
+          addChunk(event.chunkData);
+        }
         break;
 
       case 'chunk_error':
-        console.error('❌ Chunk error:', event.error);
+        console.error('Chunk error:', event.error);
+        break;
+
+      case 'chunk_retry':
+        console.log(`Chunk ${event.chunkIndex} retry attempt ${event.retryAttempt}`);
+        break;
+
+      case 'chunk_fallback':
+        console.warn(`Chunk ${event.chunkIndex} using fallback content`);
+        // Mark this chunk as fallback
+        if (event.chunkIndex) {
+          setFallbackChunks(prev => new Set([...prev, event.chunkIndex! - 1]));
+        }
+        // Still add the fallback chunk to display
+        if (event.chunkData) {
+          addChunk(event.chunkData);
+        }
+        break;
+
+      case 'stopped':
+        console.log('Generation stopped by user');
+        setStatus(prev => ({ 
+          ...prev, 
+          currentPhase: 'idle',
+          isGenerating: false 
+        }));
         break;
 
       case 'completed':
@@ -87,6 +137,9 @@ export const LongContractGenerator: React.FC = () => {
         break;
 
       case 'final_result':
+        if (event.contract) {
+          setContract(event.contract);
+        }
         setStatus(prev => ({ 
           ...prev, 
           currentPhase: 'completed',
@@ -103,7 +156,7 @@ export const LongContractGenerator: React.FC = () => {
         }));
         break;
     }
-  }, [addLog]);
+  }, [addChunk]);
 
   // Start generation
   const startGeneration = useCallback(async () => {
@@ -117,14 +170,16 @@ export const LongContractGenerator: React.FC = () => {
         totalChunks: 0,
       });
       setContract(null);
-      setLogs([]);
+      setPartialChunks([]);
+      setFallbackChunks(new Set());
+      setMetadata(null);
       setSessionId('');
 
       const es = await longContractService.startLongContractGeneration(
         prompt,
         handleSSEEvent,
         (error) => {
-          console.error('❌ Generation error:', error);
+          console.error('Generation error:', error);
           setStatus(prev => ({ 
             ...prev, 
             currentPhase: 'error',
@@ -133,7 +188,7 @@ export const LongContractGenerator: React.FC = () => {
           }));
         },
         (contractResult) => {
-          console.log('✅ Contract generation completed:', contractResult);
+          console.log('Contract generation completed:', contractResult);
           setContract(contractResult);
           setStatus(prev => ({ 
             ...prev, 
@@ -145,7 +200,7 @@ export const LongContractGenerator: React.FC = () => {
 
       setEventSource(es);
     } catch (error) {
-      console.error('❌ Failed to start generation:', error);
+      console.error('Failed to start generation:', error);
       setStatus(prev => ({ 
         ...prev, 
         currentPhase: 'error',
@@ -166,26 +221,53 @@ export const LongContractGenerator: React.FC = () => {
           currentPhase: 'idle' 
         }));
       } catch (error) {
-        console.error('❌ Failed to stop generation:', error);
+        console.error('Failed to stop generation:', error);
       }
     }
   }, [sessionId]);
 
-  // Download HTML
-  const downloadHTML = useCallback(() => {
-    if (!contract) return;
+  // Create contract from partial chunks
+  const createPartialContract = useCallback((): LongContractResponse | null => {
+    if (partialChunks.length === 0 || !metadata) return null;
 
-    const html = generateHTMLFromContract(contract);
+    return {
+      metadata: {
+        ...metadata,
+        totalSections: partialChunks.reduce((sum, chunk) => sum + chunk.sections.length, 0)
+      },
+      chunks: partialChunks,
+      generationInfo: {
+        sessionId: sessionId,
+        strategy: "CHUNKED_LONG",
+        totalTokensUsed: 0, // Unknown for partial
+        generationTime: 0 // Unknown for partial
+      }
+    };
+  }, [partialChunks, metadata, sessionId]);
+
+  // Download HTML (works with partial contracts)
+  const downloadHTML = useCallback(() => {
+    // Use final contract if available, otherwise create from partial chunks
+    const contractToDownload = contract || createPartialContract();
+    if (!contractToDownload) return;
+
+    const html = generateHTMLFromContract(contractToDownload);
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `long_contract_${contract.generationInfo.sessionId}.html`;
+    
+    // Different filename for partial vs complete
+    const filename = contract 
+      ? `long_contract_${contract.generationInfo.sessionId}.html`
+      : `partial_contract_${sessionId}_${partialChunks.length}chunks.html`;
+    
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [contract]);
+  }, [contract, partialChunks, sessionId, createPartialContract]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -201,15 +283,6 @@ export const LongContractGenerator: React.FC = () => {
 
   return (
     <div className="max-w-6xl mx-auto p-8 space-y-8">
-      {/* Header */}
-      <div className="text-center space-y-4">
-        <h1 className="text-4xl font-bold text-gray-900">
-          🚀 Long Contract Generator
-        </h1>
-        <p className="text-xl text-gray-600 max-w-2xl mx-auto">
-          Generate comprehensive 10+ page contracts with intelligent chunking
-        </p>
-      </div>
 
       {/* Input Section */}
       <div className="space-y-4">
@@ -228,7 +301,7 @@ export const LongContractGenerator: React.FC = () => {
               onClick={startGeneration}
               disabled={status.isGenerating || !prompt.trim()}
             >
-              {status.isGenerating ? '🔄 Generating...' : '🚀 Generate Long Contract'}
+              {status.isGenerating ? 'Generating...' : 'Generate Long Contract'}
             </button>
             
             {status.isGenerating && (
@@ -236,7 +309,7 @@ export const LongContractGenerator: React.FC = () => {
                 className="px-6 py-3 rounded-lg bg-red-600 text-white font-medium hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition-colors text-lg"
                 onClick={stopGeneration}
               >
-                ⚠️ Stop Generation
+                Stop Generation
               </button>
             )}
           </div>
@@ -245,9 +318,10 @@ export const LongContractGenerator: React.FC = () => {
             <button
               onClick={downloadHTML}
               className="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={!contract}
+              disabled={partialChunks.length === 0 && !contract}
+              title={partialChunks.length > 0 && !contract ? 'Download partial contract' : 'Download contract'}
             >
-              📥 Download HTML
+              Download HTML {partialChunks.length > 0 && !contract && `(${partialChunks.length} chunks)`}
             </button>
           </div>
         </div>
@@ -266,14 +340,24 @@ export const LongContractGenerator: React.FC = () => {
         <StatusDisplay status={status} sessionId={sessionId} />
       </div>
 
-      {/* Generation Logs */}
-      {logs.length > 0 && (
-        <GenerationLogs logs={logs} />
+      {/* Real-time Contract Preview */}
+      {(partialChunks.length > 0 || metadata) && (
+        <RealTimeContractDisplay 
+          metadata={metadata} 
+          chunks={partialChunks} 
+          fallbackChunks={fallbackChunks}
+          status={status}
+        />
       )}
 
-      {/* Contract Display */}
-      {contract && (
-        <ContractDisplay contract={contract} />
+      {/* Final Contract Display */}
+      {contract && status.currentPhase === 'completed' && (
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+          <h3 className="text-lg font-medium text-green-800 mb-2">
+            Contract Generation Complete!
+          </h3>
+          <ContractDisplay contract={contract} />
+        </div>
       )}
     </div>
   );
@@ -290,17 +374,6 @@ const StatusDisplay: React.FC<{ status: GenerationStatus; sessionId: string }> =
     }
   };
 
-  const getStatusMessage = () => {
-    switch (status.currentPhase) {
-      case 'analyzing': return '🧠 Analyzing contract requirements...';
-      case 'chunking': return '🧩 Planning intelligent chunks...';
-      case 'generating': return `⚡ Generating chunks (${status.completedChunks}/${status.totalChunks})`;
-      case 'completed': return '✅ Contract generation completed!';
-      case 'error': return `❌ Error: ${status.errorMessage}`;
-      default: return '⏳ Ready to generate';
-    }
-  };
-
   const color = getStatusColor();
 
   return (
@@ -310,9 +383,7 @@ const StatusDisplay: React.FC<{ status: GenerationStatus; sessionId: string }> =
           <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
         )}
         <div>
-          <h3 className={`text-lg font-medium text-${color}-800`}>
-            {getStatusMessage()}
-          </h3>
+          
           {sessionId && (
             <p className={`text-${color}-600 text-sm`}>
               Session: {sessionId}
@@ -329,15 +400,108 @@ const StatusDisplay: React.FC<{ status: GenerationStatus; sessionId: string }> =
   );
 };
 
-// Generation Logs Component
-const GenerationLogs: React.FC<{ logs: LongContractSSEEvent[] }> = ({ logs }) => (
-  <div className="bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm max-h-60 overflow-y-auto">
-    <h3 className="text-white mb-2">🔍 Generation Logs</h3>
-    {logs.map((log, index) => (
-      <div key={index} className="mb-1">
-        <span className="text-gray-400">[{log.type}]</span> {log.message}
+// Real-time Contract Display Component
+const RealTimeContractDisplay: React.FC<{ 
+  metadata: ContractMetadata | null; 
+  chunks: ContractChunk[]; 
+  fallbackChunks: Set<number>;
+  status: GenerationStatus;
+}> = ({ metadata, chunks, fallbackChunks, status }) => (
+  <div className="bg-white border border-gray-200 rounded-lg p-6">
+    <div className="flex justify-between items-center mb-6">
+      <h2 className="text-2xl font-bold text-gray-800">
+        📄 Contract Preview ({status.completedChunks}/{status.totalChunks} chunks)
+        {status.totalChunks === 0 && <span className="text-red-500 text-sm"> - Waiting for strategy...</span>}
+      </h2>
+      <div className="text-sm text-gray-500">
+        Real-time generation • {chunks.length} chunks loaded
       </div>
-    ))}
+    </div>
+
+    {/* Metadata Preview */}
+    {metadata && (
+      <div className="bg-blue-50 p-4 rounded-lg mb-6">
+        <h3 className="font-semibold mb-2 text-blue-800">📋 {metadata.title}</h3>
+        <div className="grid grid-cols-2 gap-4 text-sm text-blue-700">
+          <div><strong>Company:</strong> {metadata.companyName}</div>
+          <div><strong>Version:</strong> {metadata.version}</div>
+          <div><strong>Effective Date:</strong> {metadata.effectiveDate}</div>
+          <div><strong>Estimated Pages:</strong> {metadata.estimatedPages}</div>
+        </div>
+      </div>
+    )}
+
+    {/* Real-time Chunks */}
+    {chunks.map((chunk) => {
+      const isFallback = fallbackChunks.has(chunk.chunkIndex);
+      
+      return (
+        <div key={chunk.chunkId} className={`mb-6 p-4 rounded-lg border-l-4 ${
+          isFallback 
+            ? 'bg-gradient-to-r from-yellow-50 to-orange-50 border-yellow-500' 
+            : 'bg-gradient-to-r from-green-50 to-blue-50 border-green-500'
+        }`}>
+          <h3 className="font-medium text-gray-700 mb-3 text-lg flex items-center">
+            {isFallback ? 'Warning:' : 'Complete:'} Chunk {chunk.chunkIndex + 1} ({chunk.sections.length} sections)
+            <span className={`ml-2 text-xs px-2 py-1 rounded ${
+              isFallback 
+                ? 'bg-yellow-100 text-yellow-800' 
+                : 'bg-green-100 text-green-800'
+            }`}>
+              {isFallback ? 'Fallback content' : 'Just generated'}
+            </span>
+          </h3>
+        
+        {chunk.sections.map((section) => (
+          <div key={section.id} className="ml-4 mb-4 p-3 bg-white rounded border shadow-sm">
+            <h4 className="font-semibold text-gray-800 mb-2 text-lg">
+              Section {section.id}: {section.title}
+            </h4>
+            
+            {section.subsections.map((subsection) => (
+              <div key={subsection.id} className="ml-4 mb-3 p-2 bg-gray-50 rounded">
+                <h5 className="font-medium text-gray-700 mb-1">
+                  {subsection.id} {subsection.title}
+                </h5>
+                
+                <div className="text-sm text-gray-600 mb-2 leading-relaxed">
+                  {subsection.content.split('\n').map((paragraph, pIndex) => (
+                    <p key={pIndex} className="mb-2">{paragraph}</p>
+                  ))}
+                </div>
+                
+                {subsection.items && subsection.items.length > 0 && (
+                  <ul className="ml-4 text-sm text-gray-600">
+                    {subsection.items.map((item, itemIndex) => (
+                      <li key={itemIndex} className="mb-1 flex items-start">
+                        <span className="text-blue-500 mr-2">•</span>
+                        {item}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+        </div>
+      );
+    })}
+
+    {/* Generation in progress indicator */}
+    {status.isGenerating && (
+      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-center">
+        <div className="flex items-center justify-center gap-3">
+          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-yellow-600"></div>
+          <span className="text-yellow-800">
+            {status.currentChunk ? 
+              `Generating chunk ${status.currentChunk}/${status.totalChunks}...` : 
+              'Preparing next chunk...'
+            }
+          </span>
+        </div>
+      </div>
+    )}
   </div>
 );
 
@@ -345,7 +509,7 @@ const GenerationLogs: React.FC<{ logs: LongContractSSEEvent[] }> = ({ logs }) =>
 const ContractDisplay: React.FC<{ contract: LongContractResponse }> = ({ contract }) => (
   <div className="bg-white border border-gray-200 rounded-lg p-6">
     <div className="flex justify-between items-center mb-6">
-      <h2 className="text-2xl font-bold text-gray-800">📄 Generated Contract</h2>
+              <h2 className="text-2xl font-bold text-gray-800">Generated Contract</h2>
       <div className="text-sm text-gray-500">
         {contract.chunks.length} chunks • {contract.metadata.totalSections} sections • ~{contract.metadata.estimatedPages} pages
       </div>
@@ -369,7 +533,7 @@ const ContractDisplay: React.FC<{ contract: LongContractResponse }> = ({ contrac
 
     {/* Generation Info */}
     <div className="bg-blue-50 p-4 rounded-lg mt-6">
-      <h3 className="font-semibold mb-2">⚡ Generation Statistics</h3>
+              <h3 className="font-semibold mb-2">Generation Statistics</h3>
       <div className="grid grid-cols-3 gap-4 text-sm">
         <div><strong>Strategy:</strong> {contract.generationInfo.strategy}</div>
         <div><strong>Time:</strong> {contract.generationInfo.generationTime.toFixed(2)}s</div>
@@ -396,7 +560,7 @@ const ChunkDisplay: React.FC<{ chunk: ContractChunk; chunkIndex: number }> = ({ 
 const SectionDisplay: React.FC<{ section: ContractSection }> = ({ section }) => (
   <div className="ml-4 mb-4 p-3 bg-white rounded border">
     <h4 className="font-medium text-gray-800 mb-2">
-      📄 Section {section.id}: {section.title}
+                  Section {section.id}: {section.title}
     </h4>
     
     {section.subsections.map((subsection) => (
@@ -423,9 +587,10 @@ const SectionDisplay: React.FC<{ section: ContractSection }> = ({ section }) => 
   </div>
 );
 
-// HTML Generation utility
+// HTML Generation utility (works with partial contracts)
 const generateHTMLFromContract = (contract: LongContractResponse): string => {
   const allSections = contract.chunks.flatMap(chunk => chunk.sections);
+  const isPartial = contract.generationInfo.generationTime === 0; // Partial if no generation time
   
   return `<!DOCTYPE html>
 <html lang="en">
@@ -439,6 +604,7 @@ const generateHTMLFromContract = (contract: LongContractResponse): string => {
         .header { text-align: center; border-bottom: 3px solid #2563eb; padding-bottom: 20px; margin-bottom: 30px; }
         .header h1 { color: #1e40af; margin: 0; font-size: 2.5em; }
         .metadata { background: #f8fafc; padding: 15px; border-radius: 6px; margin-bottom: 30px; }
+        .partial-notice { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 15px; border-radius: 6px; margin-bottom: 20px; }
         .section { margin-bottom: 30px; }
         .section h2 { color: #1e40af; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; }
         .subsection { margin: 15px 0; }
@@ -452,13 +618,23 @@ const generateHTMLFromContract = (contract: LongContractResponse): string => {
         <div class="header">
             <h1>${contract.metadata.title}</h1>
             <p>Company: ${contract.metadata.companyName}</p>
+            ${isPartial ? '<p style="color: #f59e0b; font-weight: bold;">⚠ PARTIAL CONTRACT</p>' : ''}
         </div>
+        
+        ${isPartial ? `
+        <div class="partial-notice">
+            <strong>⚠ Partial Contract Notice:</strong> This document contains ${contract.chunks.length} chunk(s) 
+            that were generated before the process was stopped or interrupted. This is not a complete contract 
+            and should be reviewed and completed before use.
+        </div>
+        ` : ''}
         
         <div class="metadata">
             <strong>Effective Date:</strong> ${contract.metadata.effectiveDate}<br>
             <strong>Version:</strong> ${contract.metadata.version}<br>
-            <strong>Total Sections:</strong> ${contract.metadata.totalSections}<br>
-            <strong>Estimated Pages:</strong> ${contract.metadata.estimatedPages}
+            <strong>Generated Sections:</strong> ${contract.metadata.totalSections}<br>
+            <strong>Chunks Generated:</strong> ${contract.chunks.length}<br>
+            ${!isPartial ? `<strong>Estimated Pages:</strong> ${contract.metadata.estimatedPages}` : ''}
         </div>
         
         ${allSections.map(section => `
@@ -476,7 +652,13 @@ const generateHTMLFromContract = (contract: LongContractResponse): string => {
         
         <div class="footer">
             <p>Generated by Long Contract Generator AI</p>
-            <p>Generation Time: ${contract.generationInfo.generationTime.toFixed(2)}s | Strategy: ${contract.generationInfo.strategy}</p>
+            ${isPartial ? `
+                <p><strong>Status:</strong> Partial Contract (${contract.chunks.length} chunks generated)</p>
+                <p><strong>Note:</strong> This is an incomplete document. Complete generation recommended.</p>
+            ` : `
+                <p>Generation Time: ${contract.generationInfo.generationTime.toFixed(2)}s | Strategy: ${contract.generationInfo.strategy}</p>
+                <p><strong>Status:</strong> Complete Contract</p>
+            `}
         </div>
     </div>
 </body>

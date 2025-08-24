@@ -52,8 +52,8 @@ export interface LongContractResponse {
 // SSE Event types for long contract generation
 export interface LongContractSSEEvent {
   type: 'connected' | 'started' | 'strategy' | 'metadata' | 'chunks_start' | 
-        'chunk_start' | 'chunk_completed' | 'chunk_error' | 'completed' | 
-        'final_result' | 'error';
+        'chunk_start' | 'chunk_completed' | 'chunk_error' | 'chunk_retry' | 
+        'chunk_fallback' | 'stopped' | 'completed' | 'final_result' | 'error';
   sessionId: string;
   message: string;
   
@@ -67,6 +67,9 @@ export interface LongContractSSEEvent {
   chunkIndex?: number;
   totalChunks?: number;
   sectionsGenerated?: number;
+  retryAttempt?: number; // For retry events
+  completedChunks?: number; // For stopped events
+  chunkData?: ContractChunk; // Real-time chunk data
   contract?: LongContractResponse;
   error?: string;
 }

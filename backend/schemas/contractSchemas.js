@@ -52,6 +52,7 @@ const LongContractResponseSchema = z.object({
 });
 
 export {
-    ContractChunkSchema,
-    ContractMetadataSchema, ContractSectionSchema, ContractSubsectionSchema, LongContractResponseSchema
+  ContractChunkSchema,
+  ContractMetadataSchema, ContractSectionSchema, ContractSubsectionSchema, LongContractResponseSchema
 };
+

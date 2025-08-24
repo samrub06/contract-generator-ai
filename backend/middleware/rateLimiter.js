@@ -3,7 +3,7 @@ import rateLimit from 'express-rate-limit';
 // Rate limiting for contract generation (critical endpoint)
 export const contractGenerationLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit each IP to 10 requests per windowMs
+  max: parseInt(process.env.RATE_LIMIT_MAX) || 10, // limit each IP to 10 requests per windowMs
   message: {
     error: 'Too many contract generation requests',
     message: 'Please wait before generating another contract',

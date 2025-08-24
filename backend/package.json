@@ -25,7 +25,8 @@
     "gpt-tokenizer": "^3.0.1",
     "openai": "^5.15.0",
     "uuid": "^11.1.0",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.24.6"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

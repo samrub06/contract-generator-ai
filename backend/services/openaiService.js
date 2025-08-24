@@ -188,7 +188,7 @@ IMPORTANT:
       ],
       temperature: 0.3,
       max_tokens: 8000, // Increased for full document
-      stream: true // VRAI STREAMING - caractère par caractère
+      stream: true // Real streaming - character by character
     });
 
     let fullContent = resumeFrom;
@@ -301,7 +301,7 @@ IMPORTANT:
 async function generateLongContractChunk(chunkConfig) {
   try {
     const client = getOpenAIClient();
-    const { userPrompt, chunkIndex, totalChunks, startSection, endSection } = chunkConfig;
+    const { userPrompt, chunkIndex, totalChunks, startSection, endSection, abortSignal } = chunkConfig;
 
     console.log(`🔧 Generating chunk ${chunkIndex + 1}/${totalChunks} (sections ${startSection}-${endSection})`);
 
@@ -382,6 +382,11 @@ IMPORTANT:
       required: ["sections"]
     };
 
+    // Check for abort before API call
+    if (abortSignal && abortSignal.aborted) {
+      throw new Error('Request was aborted by user');
+    }
+
     // Generate with structured output
     const completion = await client.chat.completions.create({
       model: "gpt-4o-2024-08-06", // Model that supports structured output
@@ -404,6 +409,8 @@ IMPORTANT:
       },
       max_tokens: 4000,
       temperature: 0.3
+    }, {
+      signal: abortSignal // Pass abort signal to OpenAI request
     });
 
     const response = completion.choices[0].message.content;
@@ -430,7 +437,7 @@ IMPORTANT:
           }]
     }));
 
-    console.log(`✅ Chunk ${chunkIndex + 1} generated: ${validatedSections.length} sections`);
+    console.log(`Chunk ${chunkIndex + 1} generated: ${validatedSections.length} sections`);
 
     return {
       sections: validatedSections,
