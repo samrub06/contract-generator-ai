@@ -1,10 +1,15 @@
 # Contract Generator AI
 
-website in live : https://contract-generator-ai-1b1a3e40343c.herokuapp.com/
-diagrame drawio : https://drive.google.com/file/d/1W9EZSL7H7p-vpynmxwi369ikUYvLK5-8/view?usp=drive_link
+Website in live : https://contract-generator-ai-1b1a3e40343c.herokuapp.com/
+
+Diagram drawio : https://drive.google.com/file/d/1W9EZSL7H7p-vpynmxwi369ikUYvLK5-8/view?usp=drive_link
+
+
 
 
 ## Architecture
+
+![Architecture Diagram](architecture.png)
 
 1. **PROMPT TEXT** (req.body.prompt)
    ↓
