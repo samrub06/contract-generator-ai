@@ -2,7 +2,12 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import express from 'express';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { generalAPILimiter } from './middleware/rateLimiter.js';
+
+// Get __dirname equivalent for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 
 dotenv.config('./.env');
@@ -32,10 +37,17 @@ app.get('/api/health', (req, res) => {
 
 // Serve static files from the frontend build only in production
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../frontend/dist')));
-  // For any other route, serve index.html (for SPA)
+  const frontendPath = path.resolve(__dirname, '../frontend/dist');
+  console.log('Serving static files from:', frontendPath);
+  app.use(express.static(frontendPath));
+  
+  // For any non-API route, serve index.html (for SPA)
   app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
+    // Skip API routes
+    if (req.path.startsWith('/api/')) {
+      return res.status(404).json({ error: 'API endpoint not found' });
+    }
+    res.sendFile(path.join(frontendPath, 'index.html'));
   });
 }
 
