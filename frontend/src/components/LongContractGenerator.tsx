@@ -280,14 +280,15 @@ export const LongContractGenerator: React.FC = () => {
 
   // Calculate progress
   const progress = status.totalChunks > 0 ? (status.completedChunks / status.totalChunks) * 100 : 0;
+  const hasStarted = status.isGenerating || partialChunks.length > 0 || metadata !== null || contract !== null;
 
   return (
     <div className="max-w-6xl mx-auto p-8 space-y-8">
 
       {/* Input Section */}
-      <div className="space-y-4">
+      <div className="space-y-4 rounded-2xl border border-gray-200 bg-gradient-to-br from-slate-50 to-white p-6 shadow-xl">
         <textarea
-          className="w-full min-h-32 p-4 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none text-gray-700 placeholder-gray-400"
+          className="w-full min-h-32 p-4 rounded-xl border border-gray-200 bg-white/80 backdrop-blur shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition text-gray-700 placeholder-gray-400"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           placeholder="Describe your comprehensive contract requirements..."
@@ -297,11 +298,18 @@ export const LongContractGenerator: React.FC = () => {
         <div className="flex justify-between items-center">
           <div className="flex gap-2">
             <button
-              className="px-6 py-3 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-lg"
+              className={`px-6 py-3 rounded-xl text-white font-semibold bg-gradient-to-r from-indigo-600 via-sky-600 to-blue-600 shadow-lg hover:shadow-xl hover:from-indigo-500 hover:to-blue-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-lg transform hover:-translate-y-0.5 active:translate-y-0 ${status.isGenerating ? 'animate-pulse' : ''}`}
               onClick={startGeneration}
               disabled={status.isGenerating || !prompt.trim()}
             >
-              {status.isGenerating ? 'Generating...' : 'Generate Long Contract'}
+              {status.isGenerating ? (
+                <span className="inline-flex items-center">
+                  <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-white/60 border-t-transparent mr-2"></span>
+                  Generating...
+                </span>
+              ) : (
+                'Generate Long Contract'
+              )}
             </button>
             
             {status.isGenerating && (
@@ -314,16 +322,18 @@ export const LongContractGenerator: React.FC = () => {
             )}
           </div>
           
-          <div className="flex gap-2">
-            <button
-              onClick={downloadHTML}
-              className="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={partialChunks.length === 0 && !contract}
-              title={partialChunks.length > 0 && !contract ? 'Download partial contract' : 'Download contract'}
-            >
-              Download HTML {partialChunks.length > 0 && !contract && `(${partialChunks.length} chunks)`}
-            </button>
-          </div>
+          {hasStarted && (
+            <div className="flex gap-2">
+              <button
+                onClick={downloadHTML}
+                className="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={partialChunks.length === 0 && !contract}
+                title={partialChunks.length > 0 && !contract ? 'Download partial contract' : 'Download contract'}
+              >
+                Download HTML {partialChunks.length > 0 && !contract && `(${partialChunks.length} chunks)`}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Progress Bar */}
@@ -337,7 +347,7 @@ export const LongContractGenerator: React.FC = () => {
         )}
 
         {/* Status Display */}
-        <StatusDisplay status={status} sessionId={sessionId} />
+        {hasStarted && <StatusDisplay status={status} sessionId={sessionId} />}
       </div>
 
       {/* Real-time Contract Preview */}
